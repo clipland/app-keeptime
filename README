@@ -1,0 +1,14 @@
+App::keeptime
+
+This archive contains the distribution App::keeptime.
+Please refer to the embedded POD for documentation,
+version and license information:
+http://search.cpan.org/perldoc?App%3A%3Akeeptime
+
+
+Installation
+
+untar the archive, then do
+perl Makefile.PL
+make
+make install

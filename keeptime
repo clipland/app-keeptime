@@ -1,0 +1,178 @@
+#!perl
+
+use File::Basename ();
+
+our $VERSION = 0.03;
+
+unless($ARGV[0]){
+	print "Usage is keeptime [perl|python] <some (path to a) binary> <binary's options, probably a filename>\n";
+	exit;
+}
+
+my @command = @ARGV;
+
+my $binary = shift(@ARGV);
+if($binary =~ /perl$|python$/){
+	$binary = shift(@ARGV);
+	print "keeptime: Binary is a script: $binary\n";
+}else{
+	print "keeptime: Binary is $binary\n";
+}
+
+my $sourcefile;
+my @stat;
+my @targetfiles;
+my @stats;
+if($binary =~ /mogrify$/){
+	die "keeptime: mogrify only supported with '-format jpg' " unless "@ARGV" =~ /-format jpg/;
+
+	while( my $file = pop(@ARGV) ){
+		last if $file !~ /\.png$|\.gif|$\.bmp$/i;
+		push(@targetfiles, $file);
+		my @stat = stat($file);
+		push(@stats, \@stat || [] ); # alsways push something, until we decide where we do file -f checks
+	}
+
+	for(@targetfiles){
+		my($filename, $dir_trailing, $dot_suffix) = File::Basename::fileparse($_, qr/\.[^.]*/);
+		$_ = $dir_trailing . $filename .'.jpg';
+		print " keeptime: expecting targetfile $_\n";
+	}
+	print "keeptime: sourcefiles (list) are @targetfiles\n";
+}else{
+	$sourcefile = $ARGV[-1];
+	print "keeptime: sourcefile (single file) seems to be $sourcefile\n";
+
+	@stat = stat($sourcefile);
+	print "keeptime: stat: atime:$stat[8] mtime:$stat[9] chtime:$stat[10]\n";
+}
+
+my $returnvalue = system(@command);
+print "keeptime: command returned value $returnvalue\n";
+
+# here comes the complication:
+# tools may have the target-file as the last option, but it's not always the case
+# they might implicate the target file, for example: mogrify -format jpg file.png (target: file.jpg)
+# they might process a file-list via * glob
+# they might produce a number of output files, for example when ffmpeg outputs still-images from a video
+# sometimes files are "options without leading -", sometimes files are provided via option, like "-o output.avi"
+# for now, we treat all commands as "corner cases" until we find reusable patterns:
+if($binary =~ /cropgui\.py$/){
+	print "keeptime: using pattern for cropgui:$binary\n";
+
+	my($filename, $dir_trailing, $dot_suffix) = File::Basename::fileparse($sourcefile, qr/\.[^.]*/);
+	my $targetfile = $dir_trailing . $filename .'-crop'. $dot_suffix;
+	print "keeptime: $sourcefile ($dir_trailing $filename $dot_suffix) -> $targetfile\n";
+
+	die "keeptime: some filepath parsing error: target and source file are the same" if $targetfile eq $sourcefile;
+	if(-f $targetfile){
+		print "keeptime: adjusting mtime of $targetfile to ".localtime($stat[9])."\n";
+		utime(undef, $stat[9], $targetfile);
+		exit;
+	}else{
+		print "keeptime: $targetfile not found!\n";
+	}
+}elsif($binary =~ /mogrify$/){
+	print "keeptime: using pattern for mogrify:$binary with a file-list\n";
+
+	for(0..$#targetfiles){
+		my $targetfile = $targetfiles[$_];
+		my @stat = @{ $stats[$_] };
+		if(-f $targetfile && @stat){
+			print " keeptime: file $_: adjusting mtime of $targetfile to ".localtime($stat[9])."\n";
+			utime(undef, $stat[9], $targetfile);
+		}else{
+			print "keeptime: $targetfile not found!\n";
+		}
+	}
+	exit;
+}elsif($binary =~ /leafpad$/){
+	print "keeptime: using pattern for leafpad:$binary\n";
+
+	my $targetfile = $sourcefile;
+	print "keeptime: adjusting mtime of $targetfile to ".localtime($stat[9])."\n";
+	utime(undef, $stat[9], $targetfile);
+	exit;
+
+}
+
+print "keeptime: no timestamps adjusted\n";
+
+__END__
+
+=pod
+
+=head1 NAME
+
+keeptime - wraps other command-line tools to keep or carry-over file timestamps
+
+=head1 SYNOPSIS
+
+	$ keeptime mogrify -format jpg image.png
+
+=head1 DESCRIPTION
+
+A file's modification timestamp is an important piece of metadata. Mostly it's used in lieu
+of crtime and tells you when a file was created or downloaded. Sometimes files need
+a final touch-up, an alteration that is marginal, a measure of optimisation or error fixing.
+This kind of marginal edit is not meant to alter the timestamp. 
+
+Many CLI tools like imagemagick's I<convert> or I<mogrify>, the I<jpegtran> tool or I<ffmpeg>
+(avconv) are handy to change what's in a file or how. For example you might convert png images
+to jpg, or a wav file to mp3. But most tools miss an option to keep the timestamps of the
+original file, in case they transform in-place, or to carry over these timestamps to the new
+target file. (Well, I<optipng> offers the -preserve switch and I<mp3gain> -p, to name just two
+notable exceptions.)
+
+Anyway, so far, you had to employ a two-step process to keep (or restore) original timestamps.
+You did the alterations/transcodes and then executed "I<touch> -d" to adjust the file's mtime
+timestamp to that of the original source. Annoying, especially if the original file was altered
+in-place. Then it was actually a three-step process, with you noting down the original timestamp
+in the first place.
+
+I<keeptime> is meant as a wrapper that does just that in one go: it notes down the mtime
+of the original (source) file and after the wrapped command has exited, it adjusts the
+timestamp of an in-place edited or newly created output (target) file to equal the timestamp
+of the original (source) file.
+
+The ideas is this:
+
+	keeptime stats source-file/original
+	 (wrapped tool runs)
+	keeptime adjusts timestamp of target-/edited-file
+
+One usage scenario would be to wrap keeptime around commands you execute via Nautilus Actions:
+
+=begin HTML
+
+<p><img src="https://raw.github.com/clipland/app-keeptime/master/keeptime-nautilus-actions-demo.png" width="546" height="169" alt="Cropped screenshot of having keeptime as option in Nautilus Actions' context menu" style="border: 1px solid #888;" /></p>
+
+=end HTML
+
+=head1 CAVEATS
+
+This is alpha stage software! Be careful when you use it. Look into the source to understand
+what it does and to make sure that it's safe for you to use. And feel free to send patches
+or improvements by forking the public repository.
+
+Syntax recognition is very limited at this time. So far, keeptime only recognises I<leafpad>,
+I<mogrify> and I<cropgui>.
+
+=head1 TODO
+
+A file's mtime is only one metadata attribute probably worth carrying over. So this here might
+eventually evolve into I<keep(m)time> and a yet to write I<keepattr>. Or an even more general
+tool to preserve a selection of file-internal and file-external attributes, coming from I<stat>,
+from I<extended file attributes>, APP1 segments in JPEGs (like Exif and XMP), MP4 metadata or
+ID3 tags.
+
+=head1 AUTHOR
+
+Clipland GmbH L<http://www.clipland.com/>
+
+=head1 COPYRIGHT & LICENSE
+
+Copyright 2013 Clipland GmbH. All rights reserved.
+
+This library is free software, dual-licensed under L<GPLv3|http://www.gnu.org/licenses/gpl>/L<AL2|http://opensource.org/licenses/Artistic-2.0>.
+You can redistribute it and/or modify it under the same terms as Perl itself.
